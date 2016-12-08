@@ -11,6 +11,12 @@
 
 #define CLOCK_SPEED 16000000
 #define USART_BAUD_RATE 115200
+#define TIMER3_PERIOD_TICKS (unsigned int)(CLOCK_SPEED * 15 / USART_BAUD_RATE)
+#define TIMER3_SEC_PER_PERIOD ((float)TIMER3_PERIOD_TICKS / CLOCK_SPEED)
+#define TIMER3_MS_PER_PERIOD ((float)TIMER3_PERIOD_TICKS * 1000 / CLOCK_SPEED)
+#define TIMER14_PERIOD 24
+#define TIMER14_PRESCALER 0xFFFF
+#define TIMER14_TACTS_PER_SECOND (CLOCK_SPEED / TIMER14_PERIOD / TIMER14_PRESCALER)
 
 #define USART1_TX_DMA_CHANNEL DMA1_Channel2
 #define USART1_TDR_ADDRESS (unsigned int)(&(USART1->TDR))
@@ -57,10 +63,8 @@
 #define PIPED_TASKS_HISTORY_SIZE 10
 #define DEFAULT_ACCESS_POINT_GAIN_SIZE 4
 
-#define TIMER3_PERIOD_MS 0.13f
-#define TIMER3_PERIOD_SEC (TIMER3_PERIOD_MS / 1000)
-#define TIMER3_10MS (unsigned short)(10 / TIMER3_PERIOD_MS)
-#define TIMER3_100MS (unsigned short)(100 / TIMER3_PERIOD_MS)
+#define TIMER3_10MS (unsigned short)(10 / TIMER3_MS_PER_PERIOD)
+#define TIMER3_100MS (unsigned short)(100 / TIMER3_MS_PER_PERIOD)
 #define TIMER14_100MS 1
 #define TIMER14_200MS 2
 #define TIMER14_500MS 5
@@ -119,8 +123,9 @@ char ESP8226_REQUEST_SEND_STATUS_INFO_AND_GET_SERVER_AVAILABILITY[] __attribute_
 char ESP8226_REQUEST_SEND_STATUS_INFO_AND_ESTABLISH_LONG_POLLING_REQUEST[] __attribute__ ((section(".text.const"))) =
       "POST /server/esp8266/projectorDeferred HTTP/1.1\r\nContent-Length: <1>\r\nHost: <2>\r\nUser-Agent: ESP8266\r\nContent-Type: application/json\r\nAccept: application/json\r\nConnection: keep-alive\r\n\r\n<3>\r\n";
 char DEBUG_STATUS_JSON[] __attribute__ ((section(".text.const"))) =
-      "{\"gain\":\"<1>\",\"debugInfoIncluded\":<2>,\"errors\":\"<3>\",\"usartOverrunErrors\":\"<4>\",\"usartIdleLineDetections\":\"<5>\",\"usartNoiseDetection\":\"<6>\",\"usartFramingErrors\":\"<7>\",\"lastErrorTask\":\"<8>\",\"usartData\":\"<9>\"}";
-char STATUS_JSON[] __attribute__ ((section(".text.const"))) = "{\"gain\":\"<1>\",\"debugInfoIncluded\":<2>}";
+      "{\"gain\":\"<1>\",\"debugInfoIncluded\":<2>,\"errors\":\"<3>\",\"usartOverrunErrors\":\"<4>\",\"usartIdleLineDetections\":\"<5>\",\"usartNoiseDetection\":\"<6>\",\"usartFramingErrors\":\"<7>\",\"lastErrorTask\":\"<8>\",\"usartData\":\"<9>\",\"timeStamp\":\"<10>\"}";
+char TIMESTAMP_JSON_ELEMENT[] __attribute__ ((section(".text.const"))) = "timeStamp";
+char STATUS_JSON[] __attribute__ ((section(".text.const"))) = "{\"gain\":\"<1>\",\"debugInfoIncluded\":<2>,\"timeStamp\":\"<3>\"}";
 char ESP8226_RESPONSE_OK_STATUS_CODE[] __attribute__ ((section(".text.const"))) = "\"statusCode\":\"OK\"";
 char ESP8226_RESPONSE_HTTP_STATUS_200_OK[] __attribute__ ((section(".text.const"))) = "200 OK";
 char ESP8226_RESPONSE_HTTP_STATUS_400_BAD_REQUEST[] __attribute__ ((section(".text.const"))) = "HTTP/1.1 400 Bad Request";
@@ -150,6 +155,8 @@ volatile unsigned char esp8266_disabled_timer_g = TIMER14_5S;
 unsigned short checking_connection_status_and_server_availability_timer_g;
 volatile unsigned short visible_network_list_timer_g = TIMER14_10MIN;;
 volatile unsigned char resets_occured_g;
+volatile unsigned int response_timestamp_ms_g;
+volatile unsigned int response_timestamp_counter_g;
 
 volatile unsigned short usart_overrun_errors_counter_g;
 volatile unsigned short usart_idle_line_detection_counter_g;
@@ -211,6 +218,7 @@ void prepare_http_request(char address[], char port[], char request[], void (*on
 void resend_usart_get_request_using_global_final_task();
 void *num_to_string(unsigned int number);
 void *array_to_string(char array[], unsigned char array_length);
+char *get_gson_element_value(char *json_string, char *json_element_to_find);
 void connect_to_server();
 void resend_usart_get_request(unsigned int final_task);
 void set_bytes_amount_to_send();
@@ -228,7 +236,8 @@ unsigned char is_piped_tasks_scheduler_empty();
 void schedule_global_function_resending_and_send_request(unsigned int task, unsigned short timeout);
 void get_server_avalability(unsigned int request_task);
 char *generate_request(char *request_template);
-void *add_debug_info(char *gain, char *debug_info_included);
+void *add_debug_info(char *gain, char *debug_info_included, char *response_timestamp);
+unsigned int calculate_response_timestamp();
 void get_own_ip_address();
 void set_own_ip_address();
 void close_connection();
@@ -259,7 +268,7 @@ void TIM14_IRQHandler() {
    if (!is_esp8266_enabled(0)) {
       esp8266_disabled_counter_g++;
    }
-   if (esp8266_disabled_timer_g > 0) {
+   if (esp8266_disabled_timer_g) {
       esp8266_disabled_timer_g--;
    }
 }
@@ -267,13 +276,16 @@ void TIM14_IRQHandler() {
 void TIM3_IRQHandler() {
    TIM_ClearITPendingBit(TIM3, TIM_IT_Update);
 
-   // Some error eventually occurs when only the first symbol is exists
+   // Some error eventually occurs when only the first symbol exists
    if (usart_received_bytes_g > 1) {
       set_flag(&general_flags_g, USART_DATA_RECEIVED_FLAG);
    }
    usart_received_bytes_g = 0;
    if (send_usart_data_function_g != NULL) {
       send_usart_data_time_counter_g++;
+   }
+   if (response_timestamp_ms_g) {
+      response_timestamp_counter_g++;
    }
    network_searching_status_led_counter_g++;
 }
@@ -336,7 +348,7 @@ int main() {
    while (1) {
       if (is_esp8266_enabled(1)) {
          // Seconds
-         unsigned short send_usart_data_passed_time_sec = (unsigned short) (TIMER3_PERIOD_SEC * send_usart_data_time_counter_g);
+         unsigned short send_usart_data_passed_time_sec = (unsigned short) (TIMER3_SEC_PER_PERIOD * send_usart_data_time_counter_g);
          unsigned int sent_task = 0;
 
          if (read_flag(&general_flags_g, USART_DATA_RECEIVED_FLAG)) {
@@ -441,6 +453,11 @@ int main() {
             NVIC_SystemReset();
          }
 
+         if (read_flag(&general_flags_g, SUCCESSUFULLY_CONNECTED_TO_NETWORK_FLAG)) {
+            GPIO_WriteBit(NETWORK_STATUS_LED_PORT, NETWORK_STATUS_LED_PIN, Bit_SET);
+         } else {
+            GPIO_WriteBit(NETWORK_STATUS_LED_PORT, NETWORK_STATUS_LED_PIN, Bit_RESET);
+         }
          if (read_flag(&general_flags_g, SERVER_IS_AVAILABLE_FLAG)) {
             GPIO_WriteBit(SERVER_AVAILABILITI_LED_PORT, SERVER_AVAILABILITI_LED_PIN, Bit_SET);
          } else {
@@ -544,7 +561,6 @@ unsigned char handle_connect_to_network_task(unsigned int current_piped_task_to_
          on_successfully_receive_general_actions();
 
          set_flag(&general_flags_g, SUCCESSUFULLY_CONNECTED_TO_NETWORK_FLAG);
-         GPIO_WriteBit(NETWORK_STATUS_LED_PORT, NETWORK_STATUS_LED_PIN, Bit_SET);
       } else {
          add_error();
       }
@@ -804,7 +820,8 @@ unsigned char handle_establish_long_polling_connection_request_task(unsigned int
    } else if (read_flag(sent_task, ESTABLISH_LONG_POLLING_CONNECTION_REQUEST_TASK)) {
       not_handled = 0;
 
-      if (is_usart_response_contains_element(ESP8226_RESPONSE_SUCCSESSFULLY_SENT) && !is_usart_response_contains_element(ESP8226_RESPONSE_OK_STATUS_CODE)) {
+      if ((is_usart_response_contains_element(ESP8226_RESPONSE_HTTP_STATUS_200_OK) || is_usart_response_contains_element(ESP8226_RESPONSE_SUCCSESSFULLY_SENT)) &&
+            !is_usart_response_contains_element(ESP8226_RESPONSE_OK_STATUS_CODE)) {
          // Sometimes only "SEND OK" is received. Another data will be received later
          clear_usart_data_received_buffer();
       } else {
@@ -819,11 +836,22 @@ unsigned char handle_establish_long_polling_connection_request_task(unsigned int
                reset_flag(&general_flags_g, SEND_DEBUG_INFO_FLAG);
             }
 
+            char *timestamp = get_gson_element_value(usart_data_received_buffer_g, TIMESTAMP_JSON_ELEMENT);
+            if (timestamp != NULL) {
+               response_timestamp_ms_g = (unsigned int)strtol(timestamp, NULL, 10);
+               //response_timestamp_ms_g = 100;
+               free(timestamp);
+            } else {
+               response_timestamp_ms_g = 0;
+            }
+
             set_flag(&general_flags_g, SERVER_IS_AVAILABLE_FLAG);
          } else {
             reset_flag(&general_flags_g, SERVER_IS_AVAILABLE_FLAG);
             add_error();
          }
+
+         add_piped_task_to_send_into_tail(ESTABLISH_LONG_POLLING_CONNECTION_TASK);
       }
    }
    return not_handled;
@@ -901,16 +929,18 @@ void establish_long_polling_connection(unsigned int request_task) {
 
 char *generate_request(char *request_template) {
    char *gain = array_to_string(default_access_point_gain_g, DEFAULT_ACCESS_POINT_GAIN_SIZE);
+   char *response_timestamp = num_to_string(calculate_response_timestamp());
    char *debug_info_included = read_flag(&general_flags_g, SEND_DEBUG_INFO_FLAG) ? "true" : "false";
    char *status_json;
 
    if (read_flag(&general_flags_g, SEND_DEBUG_INFO_FLAG)) {
-      status_json = add_debug_info(gain, debug_info_included);
+      status_json = add_debug_info(gain, debug_info_included, response_timestamp);
    } else {
-      char *parameters_for_status[] = {gain, debug_info_included, NULL};
+      char *parameters_for_status[] = {gain, debug_info_included, response_timestamp, NULL};
       status_json = set_string_parameters(STATUS_JSON, parameters_for_status);
    }
    free(gain);
+   free(response_timestamp);
 
    if (received_usart_error_data_g != NULL) {
       free(received_usart_error_data_g);
@@ -927,7 +957,7 @@ char *generate_request(char *request_template) {
    return request;
 }
 
-void *add_debug_info(char *gain, char *debug_info_included) {
+void *add_debug_info(char *gain, char *debug_info_included, char *response_timestamp) {
    char *errors_amount_string = num_to_string(send_usart_data_errors_unresetable_counter_g);
    char *usart_overrun_errors_counter_string = num_to_string(usart_overrun_errors_counter_g);
    char *usart_idle_line_detection_counter_string = num_to_string(usart_idle_line_detection_counter_g);
@@ -937,7 +967,7 @@ void *add_debug_info(char *gain, char *debug_info_included) {
    char *received_usart_error_data = last_error_task_g && received_usart_error_data_g != NULL ? received_usart_error_data_g : "";
    char *parameters_for_status[] = {gain, debug_info_included, errors_amount_string, usart_overrun_errors_counter_string,
          usart_idle_line_detection_counter_string, usart_noise_detection_counter_string, usart_framing_errors_counter_string,
-         last_error_task_string, received_usart_error_data, NULL};
+         last_error_task_string, received_usart_error_data, response_timestamp, NULL};
    char *status_json = set_string_parameters(DEBUG_STATUS_JSON, parameters_for_status);
 
    free(errors_amount_string);
@@ -949,6 +979,10 @@ void *add_debug_info(char *gain, char *debug_info_included) {
 
    last_error_task_g = 0;
    return status_json;
+}
+
+unsigned int calculate_response_timestamp() {
+   return response_timestamp_ms_g + (unsigned int)(response_timestamp_counter_g * TIMER3_MS_PER_PERIOD);
 }
 
 void get_own_ip_address() {
@@ -1232,7 +1266,7 @@ void *get_received_usart_error_data() {
       }
       *(result_string + i) = received_char;
    }
-   *(result_string + received_data_length + 1) = '\0';
+   *(result_string + received_data_length) = '\0';
    return result_string;
 }
 
@@ -1349,7 +1383,7 @@ void Pins_Config() {
    GPIO_InitTypeDef gpioInitType;
    gpioInitType.GPIO_Pin = GPIO_Pin_All & ~(GPIO_Pin_13 | GPIO_Pin_14 | GPIO_Pin_9 | GPIO_Pin_10); // PA13, PA14 - Debugger pins
    gpioInitType.GPIO_Mode = GPIO_Mode_IN;
-   gpioInitType.GPIO_Speed = GPIO_Speed_Level_2; // 10 MHz
+   gpioInitType.GPIO_Speed = GPIO_Speed_Level_1; // 2 MHz
    gpioInitType.GPIO_PuPd = GPIO_PuPd_UP;
    GPIO_Init(GPIOA, &gpioInitType);
 
@@ -1395,7 +1429,7 @@ void TIMER3_Confing() {
    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3, ENABLE);
 
    TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure;
-   TIM_TimeBaseStructure.TIM_Period = CLOCK_SPEED * 15 / USART_BAUD_RATE; // CLOCK_SPEED * 15 / USART_BAUD_RATE;
+   TIM_TimeBaseStructure.TIM_Period = TIMER3_PERIOD_TICKS;
    TIM_TimeBaseStructure.TIM_Prescaler = 0;
    TIM_TimeBaseStructure.TIM_ClockDivision = TIM_CKD_DIV1;
    TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
@@ -1415,8 +1449,8 @@ void TIMER14_Confing() {
    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM14, ENABLE);
 
    TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure;
-   TIM_TimeBaseStructure.TIM_Period = 24;
-   TIM_TimeBaseStructure.TIM_Prescaler = 0xFFFF;
+   TIM_TimeBaseStructure.TIM_Period = TIMER14_PERIOD;
+   TIM_TimeBaseStructure.TIM_Prescaler = TIMER14_PRESCALER;
    TIM_TimeBaseStructure.TIM_ClockDivision = TIM_CKD_DIV2;
    TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
    TIM_TimeBaseInit(TIM14, &TIM_TimeBaseStructure);
@@ -1507,7 +1541,7 @@ void send_usard_data(char *string) {
 }
 
 /**
- * Supports only 9 parameters (1 - 9). Do not forget to call free() function on returned pointer when it's no longer needed
+ * Do not forget to call free() function on returned pointer when it's no longer needed
  *
  * *parameters - array of pointers to strings. The last parameter has to be NULL
  */
@@ -1560,24 +1594,32 @@ void *set_string_parameters(char string[], char *parameters[]) {
 
    unsigned short result_string_index = 0, input_string_index = 0;
    for (; result_string_index < result_string_length - 1; result_string_index++) {
-      char input_string_symbol = string[input_string_index];
+      char input_string_char = string[input_string_index];
 
-      if (input_string_symbol == '<') {
+      if (input_string_char == '<') {
          input_string_index++;
-         input_string_symbol = string[input_string_index] ;
+         input_string_char = string[input_string_index];
 
-         if (input_string_symbol < '1' || input_string_symbol > '9') {
+         if (input_string_char < '1' || input_string_char > '9') {
             return NULL;
          }
 
-         input_string_symbol -= 48; // Now it's not allocated_result char character, but allocated_result number
-         if (input_string_symbol > parameters_amount) {
+         unsigned char parameter_numeric_value = input_string_char - 48;
+         if (parameter_numeric_value > parameters_amount) {
             return NULL;
          }
-         input_string_index += 2;
+
+         input_string_index++;
+         input_string_char = string[input_string_index];
+
+         if (input_string_char >= '0' && input_string_char <= '9') {
+            parameter_numeric_value *= 10;
+            parameter_numeric_value += (input_string_char - 48);
+         }
+         input_string_index++;
 
          // Parameters are starting with 1
-         char *parameter = parameters[input_string_symbol - 1];
+         char *parameter = parameters[parameter_numeric_value - 1];
 
          for (; *parameter != '\0'; parameter++, result_string_index++) {
             *(allocated_result + result_string_index) = *parameter;
@@ -1681,6 +1723,44 @@ void *array_to_string(char array[], unsigned char array_length) {
    }
    result[array_length] = '\0';
    return result;
+}
+
+char *get_gson_element_value(char *json_string, char *json_element_to_find) {
+   char *json_element_to_find_in_string = strstr(json_string, json_element_to_find);
+   unsigned int json_element_to_find_length = (unsigned int) strnlen(json_element_to_find, 50);
+
+   if (json_element_to_find_in_string != NULL) {
+      json_element_to_find_in_string += json_element_to_find_length;
+      json_element_to_find_in_string++;
+   } else {
+      return NULL;
+   }
+
+   if (*json_element_to_find_in_string != ':') {
+      return NULL;
+   }
+
+   json_element_to_find_in_string++;
+   if (*json_element_to_find_in_string == '\"') {
+      json_element_to_find_in_string++;
+   }
+
+   char *json_element_to_find_value = json_element_to_find_in_string;
+   unsigned int returning_value_length = 0;
+
+   while (!(*json_element_to_find_value == '\0' || *json_element_to_find_value == '\"' || *json_element_to_find_value == '}')) {
+      returning_value_length++;
+      json_element_to_find_value++;
+   }
+   json_element_to_find_value = json_element_to_find_value - returning_value_length;
+
+   char *returning_value = malloc(returning_value_length + 1);
+
+   for (unsigned int i = 0; i < returning_value_length; i++) {
+      *(returning_value + i) = *(json_element_to_find_value + i);
+   }
+   *(returning_value + returning_value_length) = '\0';
+   return returning_value;
 }
 
 void clear_usart_data_received_buffer() {
