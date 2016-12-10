@@ -24,7 +24,7 @@
 #define NETWORK_STATUS_LED_PORT GPIOA
 #define SERVER_AVAILABILITI_LED_PIN GPIO_Pin_2
 #define SERVER_AVAILABILITI_LED_PORT GPIOA
-#define ESP8266_CONTROL_PIN GPIO_Pin_15
+#define ESP8266_CONTROL_PIN GPIO_Pin_12
 #define ESP8266_CONTROL_PORT GPIOA
 
 // General flags
@@ -163,6 +163,8 @@ volatile unsigned short usart_idle_line_detection_counter_g;
 volatile unsigned short usart_noise_detection_counter_g;
 volatile unsigned short usart_framing_errors_counter_g;
 
+volatile char abc __attribute__ ((aligned(1)));
+
 void IWDG_Config();
 void Clock_Config();
 void Pins_Config();
@@ -217,6 +219,8 @@ void prepare_http_request_without_parameters(char request_template[], unsigned i
 void prepare_http_request(char address[], char port[], char request[], void (*on_response)(), unsigned int request_task);
 void resend_usart_get_request_using_global_final_task();
 void *num_to_string(unsigned int number);
+unsigned int divide_by_10(unsigned int dividend);
+unsigned char get_first_digit(unsigned int long_digit);
 void *array_to_string(char array[], unsigned char array_length);
 char *get_gson_element_value(char *json_string, char *json_element_to_find);
 void connect_to_server();
@@ -328,6 +332,11 @@ void USART1_IRQHandler() {
 }
 
 int main() {
+   unsigned int a = atoi("111");
+   if (a > 10) {
+      usart_received_bytes_g++;
+   }
+
    RCC_APB2PeriphClockCmd(RCC_APB2Periph_DBGMCU, ENABLE);
    IWDG_Config();
    Clock_Config();
@@ -838,8 +847,8 @@ unsigned char handle_establish_long_polling_connection_request_task(unsigned int
 
             char *timestamp = get_gson_element_value(usart_data_received_buffer_g, TIMESTAMP_JSON_ELEMENT);
             if (timestamp != NULL) {
-               response_timestamp_ms_g = (unsigned int)strtol(timestamp, NULL, 10);
-               //response_timestamp_ms_g = 100;
+               //response_timestamp_ms_g = (unsigned int)strtol(timestamp, NULL, 10);
+               response_timestamp_ms_g = 100;
                free(timestamp);
             } else {
                response_timestamp_ms_g = 0;
@@ -1604,7 +1613,7 @@ void *set_string_parameters(char string[], char *parameters[]) {
             return NULL;
          }
 
-         unsigned char parameter_numeric_value = input_string_char - 48;
+         unsigned char parameter_numeric_value = input_string_char - '0';
          if (parameter_numeric_value > parameters_amount) {
             return NULL;
          }
@@ -1613,8 +1622,8 @@ void *set_string_parameters(char string[], char *parameters[]) {
          input_string_char = string[input_string_index];
 
          if (input_string_char >= '0' && input_string_char <= '9') {
-            parameter_numeric_value *= 10;
-            parameter_numeric_value += (input_string_char - 48);
+            // (parameter_numeric_value << 3) + (parameter_numeric_value << 1) == parameter_numeric_value * 10
+            parameter_numeric_value = (parameter_numeric_value << 3) + (parameter_numeric_value << 1) + input_string_char - '0';
          }
          input_string_index++;
 
@@ -1667,49 +1676,81 @@ void *num_to_string(unsigned int number) {
       return result_string_pointer;
    }
 
-   unsigned char max_string_size;
-
-   if (number <= 0xFF) {
-      // unsigned char
-      max_string_size = 3;
-   } else if (number <= 0xFFFF) {
-      // unsigned short
-      max_string_size = 5;
-   } else if (number <= 0xFFFFFF) {
-      // unsigned int
-      max_string_size = 8;
-   } else {
-      // unsigned int
-      max_string_size = 10;
-   }
-
+   unsigned char string_size = 1;
    unsigned int divider = 1;
+   unsigned int divider_tmp = 10;
 
-   for (unsigned char i = 1; i < max_string_size; i++) {
-      divider *= 10;
+   for (unsigned char i = 0; divider_tmp <= number; i++) {
+      divider = divider_tmp;
+      divider_tmp *= 10;
+      string_size++;
    }
 
    unsigned int remaining = number;
    unsigned char string_length = 0;
 
-   while (max_string_size > 0) {
-      char result_character = (char) (remaining / divider);
+   while (string_size > 0) {
+      unsigned char result_character = get_first_digit(remaining);
+      //unsigned char result_character = (unsigned char) (remaining / divider);
 
       if (result_string_pointer == NULL && result_character) {
-         result_string_pointer = malloc(max_string_size + 1);
-         string_length = max_string_size;
+         result_string_pointer = malloc(string_size + 1);
+         string_length = string_size;
       }
       if (result_string_pointer != NULL) {
-         unsigned char index = string_length - max_string_size;
-         *(result_string_pointer + index) = result_character + 48;
+         unsigned char index = string_length - string_size;
+         *(result_string_pointer + index) = result_character + '0';
       }
 
       remaining -= result_character * divider;
-      divider /= 10;
-      max_string_size--;
+      divider = divide_by_10(divider);
+      //divider /= 10;
+      string_size--;
    }
    result_string_pointer[string_length] = '\0';
    return result_string_pointer;
+}
+
+/**
+ * Only 10, 100, 1000, e.t.c can be divided by 10
+ */
+unsigned int divide_by_10(unsigned int dividend) {
+   if (dividend < 10) {
+      return 0;
+   }
+
+   unsigned int subtrahend = 0;
+   unsigned int subtrahend_tmp = 9;
+
+   while (subtrahend_tmp < dividend) {
+      subtrahend = subtrahend_tmp;
+      subtrahend_tmp *= 10;
+   }
+   return dividend - subtrahend;
+}
+
+unsigned char get_first_digit(unsigned int long_digit) {
+   if (long_digit < 10) {
+      return (unsigned char) long_digit;
+   }
+
+   // Find the most subtrahend
+   unsigned int subtrahend = 0;
+   unsigned int subtrahend_tmp = 10;
+
+   while (subtrahend_tmp <= long_digit) {
+      subtrahend = subtrahend_tmp;
+      subtrahend_tmp *= 10;
+   }
+
+   unsigned char result = 1;
+   unsigned int remaining_result = long_digit - subtrahend;
+
+   while (remaining_result >= subtrahend) {
+      result++;
+      remaining_result -= subtrahend;
+   }
+   return result;
 }
 
 /**
