@@ -96,7 +96,7 @@ char ESP8226_REQUEST_DISABLE_ECHO[] __attribute__ ((section(".text.const"))) = "
 char ESP8226_RESPONSE_BUSY[] __attribute__ ((section(".text.const"))) = "busy";
 char ESP8226_REQUEST_GET_VISIBLE_NETWORK_LIST[] __attribute__ ((section(".text.const"))) = "AT+CWLAP\r\n";
 char ESP8226_RESPONSE_VISIBLE_NETWORK_LIST_PREFIX[] __attribute__ ((section(".text.const"))) = "+CWLAP:";
-char ESP8226_REQUEST_GET_CONNECTION_STATUS[] __attribute__ ((section(".text.const"))) = "AT+CWJAP?\r\n";
+char ESP8226_REQUEST_GET_AP_CONNECTION_STATUS[] __attribute__ ((section(".text.const"))) = "AT+CWJAP?\r\n";
 char ESP8226_RESPONSE_NOT_CONNECTED_STATUS[] __attribute__ ((section(".text.const"))) = "No AP";
 char ESP8226_REQUEST_CONNECT_TO_NETWORK_AND_SAVE[] __attribute__ ((section(".text.const"))) = "AT+CWJAP_DEF=\"<1>\",\"<2>\"\r\n";
 char ESP8226_REQUEST_GET_VERSION_ID[] __attribute__ ((section(".text.const"))) = "AT+GMR\r\n";
@@ -134,6 +134,7 @@ char JSON_OBJECT_PREFIX[] __attribute__ ((section(".text.const"))) = "{";
 char RESPONSE_CLOSED_BY_TOMCAT[] __attribute__ ((section(".text.const"))) = "\r\n+IPD,5:0\r\n\r\nCLOSED\r\n";
 char RESPONSE_CLOSED_BY_TOMCAT_PREFIX[] __attribute__ ((section(".text.const"))) = "\r\n+IPD,5:0";
 char RESPONSE_CLOSED_BY_TOMCAT_SUFFIX[] __attribute__ ((section(".text.const"))) = "CLOSED\r\n";
+char RESPONSE_SERVICE_UNAVAILABLE[] __attribute__ ((section(".text.const"))) = "503 Service Unavailable";
 
 char *usart_data_to_be_transmitted_buffer_g = NULL;
 char *received_usart_error_data_g = NULL;
@@ -197,7 +198,7 @@ void USART_Config();
 void disable_echo();
 void get_network_list();
 void connect_to_network();
-void get_connection_status();
+void get_ap_connection_status();
 void schedule_function_resending(void (*function_to_execute)(), unsigned short timeout, ImmediatelyFunctionExecution execute);
 void send_usard_data(char string[]);
 unsigned char is_usart_response_contains_elements(char *data_to_be_contained[], unsigned char elements_count);
@@ -288,9 +289,6 @@ void TIM3_IRQHandler() {
    if (send_usart_data_function_g != NULL) {
       send_usart_data_time_counter_g++;
    }
-   if (response_timestamp_ms_g) {
-      response_timestamp_counter_g++;
-   }
    network_searching_status_led_counter_g++;
 }
 
@@ -332,11 +330,6 @@ void USART1_IRQHandler() {
 }
 
 int main() {
-   unsigned int a = atoi("111");
-   if (a > 10) {
-      usart_received_bytes_g++;
-   }
-
    RCC_APB2PeriphClockCmd(RCC_APB2Periph_DBGMCU, ENABLE);
    IWDG_Config();
    Clock_Config();
@@ -368,12 +361,13 @@ int main() {
                usart_data_to_be_transmitted_buffer_g = NULL;
             }
 
-            if (is_string_starts_with(usart_data_received_buffer_g, RESPONSE_CLOSED_BY_TOMCAT_PREFIX)
+            /*if (is_string_starts_with(usart_data_received_buffer_g, RESPONSE_CLOSED_BY_TOMCAT_PREFIX)
                   || is_string_starts_with(usart_data_received_buffer_g, RESPONSE_CLOSED_BY_TOMCAT_SUFFIX)) {
                is_string_starts_with(usart_data_received_buffer_g, RESPONSE_CLOSED_BY_TOMCAT_PREFIX);
             } else {
                sent_task = sent_task_g;
-            }
+            }*/
+            sent_task = sent_task_g;
          } else if (send_usart_data_function_g != NULL && send_usart_data_passed_time_sec >= send_usart_data_timout_sec_g) {
             if (usart_data_to_be_transmitted_buffer_g != NULL) {
                free(usart_data_to_be_transmitted_buffer_g);
@@ -455,7 +449,7 @@ int main() {
             }
          }
 
-         if (send_usart_data_errors_counter_g >= 5 || is_piped_tasks_scheduler_full()) {
+         if (send_usart_data_errors_counter_g >= 10 || is_piped_tasks_scheduler_full()) {
             reset_device_state();
          }
          if (resets_occured_g >= 5) {
@@ -505,7 +499,7 @@ unsigned char handle_get_connection_status_and_connect_task(unsigned int current
 
    if (current_piped_task_to_send == GET_AP_CONNECTION_STATUS_AND_CONNECT_TASK) {
       not_handled = 0;
-      schedule_function_resending(get_connection_status, 2, EXECUTE_FUNCTION_IMMEDIATELY);
+      schedule_function_resending(get_ap_connection_status, 2, EXECUTE_FUNCTION_IMMEDIATELY);
    } else if (read_flag(sent_flag, GET_AP_CONNECTION_STATUS_AND_CONNECT_TASK)) {
       not_handled = 0;
       reset_flag(&sent_task_g, GET_AP_CONNECTION_STATUS_AND_CONNECT_TASK);
@@ -534,7 +528,7 @@ unsigned char handle_get_connection_status_task(unsigned int current_piped_task_
 
    if (current_piped_task_to_send == GET_CONNECTION_STATUS_TASK) {
       not_handled = 0;
-      schedule_function_resending(get_connection_status, 2, EXECUTE_FUNCTION_IMMEDIATELY);
+      schedule_function_resending(get_ap_connection_status, 2, EXECUTE_FUNCTION_IMMEDIATELY);
    } else if (read_flag(sent_flag, GET_CONNECTION_STATUS_TASK)) {
       not_handled = 0;
       reset_flag(&sent_task_g, GET_CONNECTION_STATUS_TASK);
@@ -830,7 +824,7 @@ unsigned char handle_establish_long_polling_connection_request_task(unsigned int
       not_handled = 0;
 
       if ((is_usart_response_contains_element(ESP8226_RESPONSE_HTTP_STATUS_200_OK) || is_usart_response_contains_element(ESP8226_RESPONSE_SUCCSESSFULLY_SENT)) &&
-            !is_usart_response_contains_element(ESP8226_RESPONSE_OK_STATUS_CODE)) {
+            !is_usart_response_contains_element(ESP8226_RESPONSE_OK_STATUS_CODE) && !is_usart_response_contains_element(RESPONSE_SERVICE_UNAVAILABLE)) {
          // Sometimes only "SEND OK" is received. Another data will be received later
          clear_usart_data_received_buffer();
       } else {
@@ -845,22 +839,20 @@ unsigned char handle_establish_long_polling_connection_request_task(unsigned int
                reset_flag(&general_flags_g, SEND_DEBUG_INFO_FLAG);
             }
 
-            char *timestamp = get_gson_element_value(usart_data_received_buffer_g, TIMESTAMP_JSON_ELEMENT);
+            /*char *timestamp = get_gson_element_value(usart_data_received_buffer_g, TIMESTAMP_JSON_ELEMENT);
             if (timestamp != NULL) {
-               //response_timestamp_ms_g = (unsigned int)strtol(timestamp, NULL, 10);
-               response_timestamp_ms_g = 100;
+               response_timestamp_ms_g = atoi(timestamp);
                free(timestamp);
-            } else {
-               response_timestamp_ms_g = 0;
-            }
+            }*/
 
             set_flag(&general_flags_g, SERVER_IS_AVAILABLE_FLAG);
+            add_piped_task_to_send_into_tail(ESTABLISH_LONG_POLLING_CONNECTION_TASK);
          } else {
+            send_usart_data_timout_sec_g = 15; // Reset long timeout of long polling request
+
             reset_flag(&general_flags_g, SERVER_IS_AVAILABLE_FLAG);
             add_error();
          }
-
-         add_piped_task_to_send_into_tail(ESTABLISH_LONG_POLLING_CONNECTION_TASK);
       }
    }
    return not_handled;
@@ -938,18 +930,17 @@ void establish_long_polling_connection(unsigned int request_task) {
 
 char *generate_request(char *request_template) {
    char *gain = array_to_string(default_access_point_gain_g, DEFAULT_ACCESS_POINT_GAIN_SIZE);
-   char *response_timestamp = num_to_string(calculate_response_timestamp());
+   //char *response_timestamp = num_to_string(calculate_response_timestamp());
    char *debug_info_included = read_flag(&general_flags_g, SEND_DEBUG_INFO_FLAG) ? "true" : "false";
    char *status_json;
 
    if (read_flag(&general_flags_g, SEND_DEBUG_INFO_FLAG)) {
-      status_json = add_debug_info(gain, debug_info_included, response_timestamp);
+      status_json = add_debug_info(gain, debug_info_included, "-1");
    } else {
-      char *parameters_for_status[] = {gain, debug_info_included, response_timestamp, NULL};
+      char *parameters_for_status[] = {gain, debug_info_included, "-1", NULL};
       status_json = set_string_parameters(STATUS_JSON, parameters_for_status);
    }
    free(gain);
-   free(response_timestamp);
 
    if (received_usart_error_data_g != NULL) {
       free(received_usart_error_data_g);
@@ -988,10 +979,6 @@ void *add_debug_info(char *gain, char *debug_info_included, char *response_times
 
    last_error_task_g = 0;
    return status_json;
-}
-
-unsigned int calculate_response_timestamp() {
-   return response_timestamp_ms_g + (unsigned int)(response_timestamp_counter_g * TIMER3_MS_PER_PERIOD);
 }
 
 void get_own_ip_address() {
@@ -1051,7 +1038,6 @@ void prepare_http_request(char address[], char port[], char request[], void (*ex
    add_piped_task_to_send_into_tail(CONNECT_TO_SERVER_TASK);
    add_piped_task_to_send_into_tail(SET_BYTES_TO_SEND_IN_REQUEST_TASK);
    add_piped_task_to_send_into_tail(request_task);
-   //add_piped_task_to_send_into_tail(CLOSE_CONNECTION_FLAG);
 }
 
 void resend_usart_get_request_using_global_final_task() {
@@ -1068,7 +1054,6 @@ void resend_usart_get_request(unsigned int final_task) {
    add_piped_task_to_send_into_tail(CONNECT_TO_SERVER_TASK);
    add_piped_task_to_send_into_tail(SET_BYTES_TO_SEND_IN_REQUEST_TASK);
    add_piped_task_to_send_into_tail(final_task);
-   //add_piped_task_to_send_into_tail(CLOSE_CONNECTION_FLAG);
 }
 
 void clear_piped_request_commands_to_send() {
@@ -1338,8 +1323,8 @@ void get_network_list() {
    set_flag(&sent_task_g, GET_VISIBLE_NETWORK_LIST_TASK);
 }
 
-void get_connection_status() {
-   send_usard_data(ESP8226_REQUEST_GET_CONNECTION_STATUS);
+void get_ap_connection_status() {
+   send_usard_data(ESP8226_REQUEST_GET_AP_CONNECTION_STATUS);
    set_flag(&sent_task_g, GET_AP_CONNECTION_STATUS_AND_CONNECT_TASK);
 }
 
