@@ -24,14 +24,17 @@
 #define NETWORK_STATUS_LED_PORT GPIOA
 #define SERVER_AVAILABILITI_LED_PIN GPIO_Pin_2
 #define SERVER_AVAILABILITI_LED_PORT GPIOA
-#define ESP8266_CONTROL_PIN GPIO_Pin_12
+#define ESP8266_CONTROL_PIN GPIO_Pin_15
 #define ESP8266_CONTROL_PORT GPIOA
+#define PROJECTOR_RELAY_PIN GPIO_Pin_7
+#define PROJECTOR_RELAY_PORT GPIOA
 
 // General flags
 #define USART_DATA_RECEIVED_FLAG 1
 #define SERVER_IS_AVAILABLE_FLAG 2
 #define SUCCESSUFULLY_CONNECTED_TO_NETWORK_FLAG 4
 #define SEND_DEBUG_INFO_FLAG 8
+#define TURN_PROJECTOR_ON 16
 
 #define GET_VISIBLE_NETWORK_LIST_TASK 1
 #define DISABLE_ECHO_TASK 2
@@ -118,13 +121,12 @@ char ESP8226_REQUEST_SET_DEFAULT_STATION_WIFI_MODE[] __attribute__ ((section(".t
 char ESP8226_REQUEST_GET_OWN_IP_ADDRESS[] __attribute__ ((section(".text.const"))) = "AT+CIPSTA_DEF?\r\n";
 char ESP8226_RESPONSE_CURRENT_OWN_IP_ADDRESS_PREFIX[] __attribute__ ((section(".text.const"))) = "+CIPSTA_DEF:ip:";
 char ESP8226_REQUEST_SET_OWN_IP_ADDRESS[] __attribute__ ((section(".text.const"))) = "AT+CIPSTA_DEF=\"<1>\"\r\n";
-char ESP8226_REQUEST_SEND_STATUS_INFO_AND_GET_SERVER_AVAILABILITY[] __attribute__ ((section(".text.const"))) =
-      "POST /server/esp8266/statusInfo HTTP/1.1\r\nContent-Length: <1>\r\nHost: <2>\r\nUser-Agent: ESP8266\r\nContent-Type: application/json\r\nAccept: application/json\r\nConnection: keep-alive\r\n\r\n<3>\r\n";
 char ESP8226_REQUEST_SEND_STATUS_INFO_AND_ESTABLISH_LONG_POLLING_REQUEST[] __attribute__ ((section(".text.const"))) =
       "POST /server/esp8266/projectorDeferred HTTP/1.1\r\nContent-Length: <1>\r\nHost: <2>\r\nUser-Agent: ESP8266\r\nContent-Type: application/json\r\nAccept: application/json\r\nConnection: keep-alive\r\n\r\n<3>\r\n";
 char DEBUG_STATUS_JSON[] __attribute__ ((section(".text.const"))) =
       "{\"gain\":\"<1>\",\"debugInfoIncluded\":<2>,\"errors\":\"<3>\",\"usartOverrunErrors\":\"<4>\",\"usartIdleLineDetections\":\"<5>\",\"usartNoiseDetection\":\"<6>\",\"usartFramingErrors\":\"<7>\",\"lastErrorTask\":\"<8>\",\"usartData\":\"<9>\",\"timeStamp\":\"<10>\"}";
 char TIMESTAMP_JSON_ELEMENT[] __attribute__ ((section(".text.const"))) = "timeStamp";
+char TURN_ON_TRUE_JSON_ELEMENT[] __attribute__ ((section(".text.const"))) = "\"turnOn\":true";
 char STATUS_JSON[] __attribute__ ((section(".text.const"))) = "{\"gain\":\"<1>\",\"debugInfoIncluded\":<2>,\"timeStamp\":\"<3>\"}";
 char ESP8226_RESPONSE_OK_STATUS_CODE[] __attribute__ ((section(".text.const"))) = "\"statusCode\":\"OK\"";
 char ESP8226_RESPONSE_HTTP_STATUS_200_OK[] __attribute__ ((section(".text.const"))) = "200 OK";
@@ -164,8 +166,6 @@ volatile unsigned short usart_idle_line_detection_counter_g;
 volatile unsigned short usart_noise_detection_counter_g;
 volatile unsigned short usart_framing_errors_counter_g;
 
-volatile char abc __attribute__ ((aligned(1)));
-
 void IWDG_Config();
 void Clock_Config();
 void Pins_Config();
@@ -183,8 +183,6 @@ unsigned char handle_set_default_station_wifi_mode_task(unsigned int current_pip
 unsigned char handle_get_own_ip_address_task(unsigned int current_piped_task_to_send, unsigned int *sent_flag);
 unsigned char handle_set_own_ip_address_task(unsigned int current_piped_task_to_send, unsigned int *sent_flag);
 unsigned char handle_close_connection_task(unsigned int current_piped_task_to_send, unsigned int *sent_flag);
-unsigned char handle_get_server_availability_task(unsigned int current_piped_task_to_send);
-unsigned char handle_get_server_availability_request_task(unsigned int current_piped_task_to_send, unsigned int *sent_task);
 unsigned char handle_get_visible_network_list_task(unsigned int current_piped_task_to_send, unsigned int *sent_task);
 unsigned char handle_establish_long_polling_connection_task(unsigned int current_piped_task_to_send);
 unsigned char handle_establish_long_polling_connection_request_task(unsigned int current_piped_task_to_send, unsigned int *sent_task);
@@ -239,7 +237,6 @@ unsigned char is_piped_task_to_send_scheduled(unsigned int task);
 unsigned char is_piped_tasks_scheduler_full();
 unsigned char is_piped_tasks_scheduler_empty();
 void schedule_global_function_resending_and_send_request(unsigned int task, unsigned short timeout);
-void get_server_avalability(unsigned int request_task);
 char *generate_request(char *request_template);
 void *add_debug_info(char *gain, char *debug_info_included, char *response_timestamp);
 unsigned int calculate_response_timestamp();
@@ -420,12 +417,6 @@ int main() {
                not_handled = handle_close_connection_task(current_piped_task_to_send, &sent_task);
             }
             if (not_handled) {
-               not_handled = handle_get_server_availability_task(current_piped_task_to_send);
-            }
-            if (not_handled) {
-               not_handled = handle_get_server_availability_request_task(current_piped_task_to_send, &sent_task);
-            }
-            if (not_handled) {
                not_handled = handle_get_visible_network_list_task(current_piped_task_to_send, &sent_task);
             }
             if (not_handled) {
@@ -465,6 +456,11 @@ int main() {
             GPIO_WriteBit(SERVER_AVAILABILITI_LED_PORT, SERVER_AVAILABILITI_LED_PIN, Bit_SET);
          } else {
             GPIO_WriteBit(SERVER_AVAILABILITI_LED_PORT, SERVER_AVAILABILITI_LED_PIN, Bit_RESET);
+         }
+         if (read_flag(&general_flags_g, TURN_PROJECTOR_ON)) {
+            GPIO_WriteBit(PROJECTOR_RELAY_PORT, PROJECTOR_RELAY_PIN, Bit_SET);
+         } else {
+            GPIO_WriteBit(PROJECTOR_RELAY_PORT, PROJECTOR_RELAY_PIN, Bit_RESET);
          }
       } else if (esp8266_disabled_counter_g >= TIMER14_1S) {
          esp8266_disabled_counter_g = 0;
@@ -731,56 +727,6 @@ unsigned char handle_close_connection_task(unsigned int current_piped_task_to_se
    return not_handled;
 }
 
-unsigned char handle_get_server_availability_task(unsigned int current_piped_task_to_send) {
-   unsigned char not_handled = 1;
-
-   if (current_piped_task_to_send == GET_SERVER_AVAILABILITY_TASK) {
-      not_handled = 0;
-      // Request 1 part. Preparation
-      delete_piped_task(current_piped_task_to_send);
-      get_server_avalability(GET_SERVER_AVAILABILITY_REQUEST_TASK);
-   }
-   return not_handled;
-}
-
-unsigned char handle_get_server_availability_request_task(unsigned int current_piped_task_to_send, unsigned int *sent_task) {
-   unsigned char not_handled = 1;
-
-   if (current_piped_task_to_send == GET_SERVER_AVAILABILITY_REQUEST_TASK) {
-      not_handled = 0;
-      // Part 2
-      schedule_global_function_resending_and_send_request(GET_SERVER_AVAILABILITY_REQUEST_TASK, 10);
-   } else if (read_flag(sent_task, GET_SERVER_AVAILABILITY_REQUEST_TASK)) {
-      not_handled = 0;
-
-      if (is_usart_response_contains_element(ESP8226_RESPONSE_HTTP_STATUS_400_BAD_REQUEST)) {
-         NVIC_SystemReset(); // Sometimes some error occurred
-      } else if (is_usart_response_contains_element(ESP8226_RESPONSE_SUCCSESSFULLY_SENT) && !is_usart_response_contains_element(ESP8226_RESPONSE_OK_STATUS_CODE)) {
-         // Sometimes only "SEND OK" is received. Another data will be received later
-         clear_usart_data_received_buffer();
-      } else {
-         reset_flag(&sent_task_g, GET_SERVER_AVAILABILITY_REQUEST_TASK);
-
-         if (is_usart_response_contains_element(ESP8226_RESPONSE_OK_STATUS_CODE)) {
-            on_successfully_receive_general_actions();
-
-            if (is_usart_response_contains_element(SERVER_STATUS_INCLUDE_DEBUG_INFO)) {
-               set_flag(&general_flags_g, SEND_DEBUG_INFO_FLAG);
-            } else {
-               reset_flag(&general_flags_g, SEND_DEBUG_INFO_FLAG);
-            }
-
-            // Reset counter to send the next request in the time interval starting from the received time
-            checking_connection_status_and_server_availability_timer_g = TIMER14_30S;
-            set_flag(&general_flags_g, SERVER_IS_AVAILABLE_FLAG);
-         } else {
-            add_error();
-         }
-      }
-   }
-   return not_handled;
-}
-
 unsigned char handle_get_visible_network_list_task(unsigned int current_piped_task_to_send, unsigned int *sent_task) {
    unsigned char not_handled = 1;
 
@@ -837,6 +783,11 @@ unsigned char handle_establish_long_polling_connection_request_task(unsigned int
                set_flag(&general_flags_g, SEND_DEBUG_INFO_FLAG);
             } else {
                reset_flag(&general_flags_g, SEND_DEBUG_INFO_FLAG);
+            }
+            if (is_usart_response_contains_element(TURN_ON_TRUE_JSON_ELEMENT)) {
+               set_flag(&general_flags_g, TURN_PROJECTOR_ON);
+            } else {
+               reset_flag(&general_flags_g, TURN_PROJECTOR_ON);
             }
 
             /*char *timestamp = get_gson_element_value(usart_data_received_buffer_g, TIMESTAMP_JSON_ELEMENT);
@@ -914,12 +865,6 @@ void add_error() {
       received_usart_error_data_g = NULL;
    }
    received_usart_error_data_g = get_received_usart_error_data();
-}
-
-void get_server_avalability(unsigned int request_task) {
-   char *request = generate_request(ESP8226_REQUEST_SEND_STATUS_INFO_AND_GET_SERVER_AVAILABILITY);
-
-   prepare_http_request(ESP8226_SERVER_IP_ADDRESS, ESP8226_SERVER_PORT, request, NULL, request_task);
 }
 
 void establish_long_polling_connection(unsigned int request_task) {
@@ -1409,8 +1354,10 @@ void Pins_Config() {
 
    // ESP8266 enable/disable
    gpioInitType.GPIO_Pin = ESP8266_CONTROL_PIN;
-   gpioInitType.GPIO_PuPd = GPIO_PuPd_NOPULL;
    GPIO_Init(ESP8266_CONTROL_PORT, &gpioInitType);
+
+   gpioInitType.GPIO_Pin = PROJECTOR_RELAY_PIN;
+   GPIO_Init(PROJECTOR_RELAY_PORT, &gpioInitType);
 }
 
 /**
