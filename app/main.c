@@ -20,9 +20,9 @@
 
 #define USART1_TX_DMA_CHANNEL DMA1_Channel2
 #define USART1_TDR_ADDRESS (unsigned int)(&(USART1->TDR))
-#define NETWORK_STATUS_LED_PIN GPIO_Pin_1
+#define NETWORK_STATUS_LED_PIN GPIO_Pin_5
 #define NETWORK_STATUS_LED_PORT GPIOA
-#define SERVER_AVAILABILITI_LED_PIN GPIO_Pin_2
+#define SERVER_AVAILABILITI_LED_PIN GPIO_Pin_6
 #define SERVER_AVAILABILITI_LED_PORT GPIOA
 #define ESP8266_CONTROL_PIN GPIO_Pin_15
 #define ESP8266_CONTROL_PORT GPIOA
@@ -457,7 +457,8 @@ int main() {
          } else {
             GPIO_WriteBit(SERVER_AVAILABILITI_LED_PORT, SERVER_AVAILABILITI_LED_PIN, Bit_RESET);
          }
-         if (read_flag(&general_flags_g, TURN_PROJECTOR_ON)) {
+         if (read_flag(&general_flags_g, TURN_PROJECTOR_ON) && read_flag(&general_flags_g, SUCCESSUFULLY_CONNECTED_TO_NETWORK_FLAG) &&
+               read_flag(&general_flags_g, SERVER_IS_AVAILABLE_FLAG)) {
             GPIO_WriteBit(PROJECTOR_RELAY_PORT, PROJECTOR_RELAY_PIN, Bit_SET);
          } else {
             GPIO_WriteBit(PROJECTOR_RELAY_PORT, PROJECTOR_RELAY_PIN, Bit_RESET);
@@ -876,13 +877,14 @@ void establish_long_polling_connection(unsigned int request_task) {
 char *generate_request(char *request_template) {
    char *gain = array_to_string(default_access_point_gain_g, DEFAULT_ACCESS_POINT_GAIN_SIZE);
    //char *response_timestamp = num_to_string(calculate_response_timestamp());
+   char *response_timestamp = "-1";
    char *debug_info_included = read_flag(&general_flags_g, SEND_DEBUG_INFO_FLAG) ? "true" : "false";
    char *status_json;
 
    if (read_flag(&general_flags_g, SEND_DEBUG_INFO_FLAG)) {
-      status_json = add_debug_info(gain, debug_info_included, "-1");
+      status_json = add_debug_info(gain, debug_info_included, response_timestamp);
    } else {
-      char *parameters_for_status[] = {gain, debug_info_included, "-1", NULL};
+      char *parameters_for_status[] = {gain, debug_info_included, response_timestamp, NULL};
       status_json = set_string_parameters(STATUS_JSON, parameters_for_status);
    }
    free(gain);
@@ -1545,7 +1547,7 @@ void *set_string_parameters(char string[], char *parameters[]) {
             return NULL;
          }
 
-         unsigned char parameter_numeric_value = input_string_char - '0';
+         unsigned short parameter_numeric_value = input_string_char - '0';
          if (parameter_numeric_value > parameters_amount) {
             return NULL;
          }
@@ -1554,8 +1556,8 @@ void *set_string_parameters(char string[], char *parameters[]) {
          input_string_char = string[input_string_index];
 
          if (input_string_char >= '0' && input_string_char <= '9') {
-            // (parameter_numeric_value << 3) + (parameter_numeric_value << 1) == parameter_numeric_value * 10
-            parameter_numeric_value = (parameter_numeric_value << 3) + (parameter_numeric_value << 1) + input_string_char - '0';
+            parameter_numeric_value = parameter_numeric_value * 10 + input_string_char - '0';
+            input_string_index++;
          }
          input_string_index++;
 
