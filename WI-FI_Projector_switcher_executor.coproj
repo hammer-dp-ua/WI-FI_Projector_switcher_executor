@@ -19,7 +19,7 @@
           <Define name="STM32F030"/>
           <Define name="USE_STDPERIPH_DRIVER"/>
           <Define name="ARM_MATH_CM0"/>
-          <Define name="STM32F030K6T6"/>
+          <Define name="STM32F030F4P6"/>
         </DefinedSymbols>
       </Compile>
       <Link useDefault="0">
@@ -105,8 +105,8 @@
     <File name="components/cmsis_core/core_cm0plus.h" path="components/coocox-master/cmsis_core/source/core_cm0plus.h" type="1"/>
     <File name="components/cmsis_core/core_sc000.h" path="components/coocox-master/cmsis_core/source/core_sc000.h" type="1"/>
     <File name="stm32f0xx_syscfg.c" path="app/stm32f0xx_syscfg.c" type="1"/>
-    <File name="components/C_library" path="" type="2"/>
     <File name="device_settings.h" path="app/device_settings.h" type="1"/>
+    <File name="components/C_library" path="" type="2"/>
     <File name="components/cmsis_core/core_cm0.h" path="components/coocox-master/cmsis_core/source/core_cm0.h" type="1"/>
     <File name="components/system_stm32f0xx.h" path="components/system_stm32f0xx.h" type="1"/>
     <File name="components/startup_stm32f0xx.s" path="components/startup_stm32f0xx.s" type="1"/>
