@@ -1639,7 +1639,11 @@ void *num_to_string(unsigned int number) {
    unsigned char string_length = 0;
 
    while (string_size > 0) {
-      unsigned char result_character = get_first_digit(remaining);
+      unsigned char last_digit_was_zero = 0;
+      if (remaining < divider) {
+         last_digit_was_zero = 1;
+      }
+      unsigned char result_character = last_digit_was_zero ? 0 : get_first_digit(remaining);
       //unsigned char result_character = (unsigned char) (remaining / divider);
 
       if (result_string_pointer == NULL && result_character) {
@@ -1651,7 +1655,9 @@ void *num_to_string(unsigned int number) {
          *(result_string_pointer + index) = result_character + '0';
       }
 
-      remaining -= result_character * divider;
+      if (!last_digit_was_zero) {
+         remaining -= result_character * divider;
+      }
       divider = divide_by_10(divider);
       //divider /= 10;
       string_size--;
