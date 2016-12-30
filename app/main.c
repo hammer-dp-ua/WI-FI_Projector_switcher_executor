@@ -60,7 +60,7 @@
 #define SET_OWN_IP_ADDRESS_TASK 64
 #define CONNECT_TO_SERVER_TASK 128
 #define SET_BYTES_TO_SEND_IN_REQUEST_TASK 256
-#define GET_REQUEST_SENT_AND_RESPONSE_RECEIVED_TASK 512
+//
 #define POST_REQUEST_SENT_TASK 1024
 #define GET_CURRENT_DEFAULT_WIFI_MODE_TASK 2048
 #define SET_DEFAULT_STATION_WIFI_MODE_TASK 4096
@@ -139,10 +139,10 @@ char ESP8226_REQUEST_SET_OWN_IP_ADDRESS[] __attribute__ ((section(".text.const")
 char ESP8226_REQUEST_SEND_STATUS_INFO_AND_ESTABLISH_LONG_POLLING_REQUEST[] __attribute__ ((section(".text.const"))) =
       "POST /server/esp8266/projectorDeferred HTTP/1.1\r\nContent-Length: <1>\r\nHost: <2>\r\nUser-Agent: ESP8266\r\nContent-Type: application/json\r\nAccept: application/json\r\nConnection: keep-alive\r\n\r\n<3>\r\n";
 char DEBUG_STATUS_JSON[] __attribute__ ((section(".text.const"))) =
-      "{\"gain\":\"<1>\",\"debugInfoIncluded\":<2>,\"errors\":\"<3>\",\"usartOverrunErrors\":\"<4>\",\"usartIdleLineDetections\":\"<5>\",\"usartNoiseDetection\":\"<6>\",\"usartFramingErrors\":\"<7>\",\"lastErrorTask\":\"<8>\",\"usartData\":\"<9>\",\"timeStamp\":\"<10>\"}";
+      "{\"gain\":\"<1>\",\"debugInfoIncluded\":<2>,\"errors\":\"<3>\",\"usartOverrunErrors\":\"<4>\",\"usartIdleLineDetections\":\"<5>\",\"usartNoiseDetection\":\"<6>\",\"usartFramingErrors\":\"<7>\",\"lastErrorTask\":\"<8>\",\"usartData\":\"<9>\",\"timeStamp\":\"<10>\",\"serverIsAvailable\":<11>}";
 char TIMESTAMP_JSON_ELEMENT[] __attribute__ ((section(".text.const"))) = "timeStamp";
 char TURN_ON_TRUE_JSON_ELEMENT[] __attribute__ ((section(".text.const"))) = "\"turnOn\":true";
-char STATUS_JSON[] __attribute__ ((section(".text.const"))) = "{\"gain\":\"<1>\",\"debugInfoIncluded\":<2>,\"timeStamp\":\"<3>\"}";
+char STATUS_JSON[] __attribute__ ((section(".text.const"))) = "{\"gain\":\"<1>\",\"debugInfoIncluded\":<2>,\"timeStamp\":\"<3>\",\"serverIsAvailable\":<4>}";
 char ESP8226_RESPONSE_OK_STATUS_CODE[] __attribute__ ((section(".text.const"))) = "\"statusCode\":\"OK\"";
 char ESP8226_RESPONSE_HTTP_STATUS_200_OK[] __attribute__ ((section(".text.const"))) = "200 OK";
 char ESP8226_RESPONSE_HTTP_STATUS_400_BAD_REQUEST[] __attribute__ ((section(".text.const"))) = "HTTP/1.1 400 Bad Request";
@@ -192,7 +192,6 @@ unsigned char handle_get_connection_status_task(unsigned int current_piped_task_
 unsigned char handle_connect_to_network_task(unsigned int current_piped_task_to_send, unsigned int *sent_flag);
 unsigned char handle_connect_to_server_task(unsigned int current_piped_task_to_send, unsigned int *sent_flag);
 unsigned char handle_set_bytes_to_send_in_request_task(unsigned int current_piped_task_to_send, unsigned int *sent_flag);
-unsigned char handle_get_request_sent_and_response_received_task(unsigned int current_piped_task_to_send, unsigned int *sent_flag);
 unsigned char handle_get_current_default_wifi_mode_task(unsigned int current_piped_task_to_send, unsigned int *sent_flag);
 unsigned char handle_set_default_station_wifi_mode_task(unsigned int current_piped_task_to_send, unsigned int *sent_flag);
 unsigned char handle_get_own_ip_address_task(unsigned int current_piped_task_to_send, unsigned int *sent_flag);
@@ -231,14 +230,14 @@ void delete_piped_task(unsigned int task);
 void on_successfully_receive_general_actions();
 void prepare_http_request_without_parameters(char request_template[], unsigned int request_task);
 void prepare_http_request(char address[], char port[], char request[], void (*on_response)(), unsigned int request_task);
-void resend_usart_get_request_using_global_final_task();
+void resend_usart_http_request_using_global_final_task();
 void *num_to_string(unsigned int number);
 unsigned int divide_by_10(unsigned int dividend);
 unsigned char get_first_digit(unsigned int long_digit);
 void *array_to_string(char array[], unsigned char array_length);
 char *get_gson_element_value(char *json_string, char *json_element_to_find);
 void connect_to_server();
-void resend_usart_get_request(unsigned int final_task);
+void resend_usart_http_request(unsigned int final_task);
 void set_bytes_amount_to_send();
 void send_request(unsigned int sent_task_to_set);
 void get_current_default_wifi_mode();
@@ -251,9 +250,9 @@ void delete_all_piped_tasks();
 unsigned char is_piped_task_to_send_scheduled(unsigned int task);
 unsigned char is_piped_tasks_scheduler_full();
 unsigned char is_piped_tasks_scheduler_empty();
-void schedule_global_function_resending_and_send_request(unsigned int task, unsigned short timeout);
+void schedule_global_function_resending_and_send_request(unsigned int task_to_be_sent, unsigned int task_to_be_sent_in_case_of_error, unsigned short timeout);
 char *generate_request(char *request_template);
-void *add_debug_info(char *gain, char *debug_info_included, char *response_timestamp);
+void *add_debug_info(char *gain, char *debug_info_included, char *response_timestamp, char *server_is_available);
 unsigned int calculate_response_timestamp();
 void get_own_ip_address();
 void set_own_ip_address();
@@ -343,7 +342,7 @@ void USART1_IRQHandler() {
 
 int main() {
    RCC_APB2PeriphClockCmd(RCC_APB2Periph_DBGMCU, ENABLE);
-   IWDG_Config();
+   //IWDG_Config();
    Clock_Config();
    Pins_Config();
    disable_esp8266();
@@ -358,6 +357,8 @@ int main() {
    add_piped_task_to_send_into_tail(GET_AP_CONNECTION_STATUS_AND_CONNECT_TASK);
    add_piped_task_to_send_into_tail(GET_VISIBLE_NETWORK_LIST_TASK);
    add_piped_task_to_send_into_tail(ESTABLISH_LONG_POLLING_CONNECTION_TASK);
+
+   set_flag(&general_flags_g, SEND_DEBUG_INFO_FLAG);
 
    while (1) {
       if (is_esp8266_enabled(1)) {
@@ -412,9 +413,6 @@ int main() {
             }
             if (not_handled) {
                not_handled = handle_set_bytes_to_send_in_request_task(current_piped_task_to_send, &sent_task);
-            }
-            if (not_handled) {
-               not_handled = handle_get_request_sent_and_response_received_task(current_piped_task_to_send, &sent_task);
             }
             if (not_handled) {
                not_handled = handle_get_current_default_wifi_mode_task(current_piped_task_to_send, &sent_task);
@@ -623,27 +621,6 @@ unsigned char handle_set_bytes_to_send_in_request_task(unsigned int current_pipe
    return not_handled;
 }
 
-unsigned char handle_get_request_sent_and_response_received_task(unsigned int current_piped_task_to_send, unsigned int *sent_flag) {
-   unsigned char not_handled = 1;
-
-   if (current_piped_task_to_send == GET_REQUEST_SENT_AND_RESPONSE_RECEIVED_TASK) {
-      not_handled = 0;
-      schedule_global_function_resending_and_send_request(GET_REQUEST_SENT_AND_RESPONSE_RECEIVED_TASK, 10);
-   } else if (read_flag(sent_flag, GET_REQUEST_SENT_AND_RESPONSE_RECEIVED_TASK)) {
-      not_handled = 0;
-      reset_flag(&sent_task_g, GET_REQUEST_SENT_AND_RESPONSE_RECEIVED_TASK);
-
-      char *data_to_be_contained[] = {ESP8226_RESPONSE_SUCCSESSFULLY_SENT, ESP8226_RESPONSE_PREFIX};
-      if (is_usart_response_contains_elements(data_to_be_contained, 2)) {
-         on_successfully_receive_general_actions();
-      } else {
-         //resend_usart_get_request(GET_REQUEST_SENT_AND_RESPONSE_RECEIVED_FLAG);
-         add_error();
-      }
-   }
-   return not_handled;
-}
-
 unsigned char handle_get_current_default_wifi_mode_task(unsigned int current_piped_task_to_send, unsigned int *sent_flag) {
    unsigned char not_handled = 1;
 
@@ -781,7 +758,7 @@ unsigned char handle_establish_long_polling_connection_request_task(unsigned int
    if (current_piped_task_to_send == ESTABLISH_LONG_POLLING_CONNECTION_REQUEST_TASK) {
       not_handled = 0;
       // Part 2
-      schedule_global_function_resending_and_send_request(ESTABLISH_LONG_POLLING_CONNECTION_REQUEST_TASK, 330); // 5.5 minutes
+      schedule_global_function_resending_and_send_request(ESTABLISH_LONG_POLLING_CONNECTION_REQUEST_TASK, ESTABLISH_LONG_POLLING_CONNECTION_TASK, 330); // 5.5 minutes
    } else if (read_flag(sent_task, ESTABLISH_LONG_POLLING_CONNECTION_REQUEST_TASK)) {
       not_handled = 0;
 
@@ -815,7 +792,7 @@ unsigned char handle_establish_long_polling_connection_request_task(unsigned int
             set_flag(&general_flags_g, SERVER_IS_AVAILABLE_FLAG);
             add_piped_task_to_send_into_tail(ESTABLISH_LONG_POLLING_CONNECTION_TASK);
          } else {
-            send_usart_data_timout_sec_g = 15; // Reset long timeout of long polling request
+            send_usart_data_timout_sec_g = 5; // Reset long timeout of long polling request
 
             reset_flag(&general_flags_g, SERVER_IS_AVAILABLE_FLAG);
             add_error();
@@ -864,11 +841,11 @@ void check_visible_network_list() {
 /**
  * @param timeout timeout in seconds
  */
-void schedule_global_function_resending_and_send_request(unsigned int task, unsigned short timeout) {
-   final_task_for_request_resending_g = task;
-   schedule_function_resending(resend_usart_get_request_using_global_final_task, timeout, DO_NOT_EXECUTE_FUNCTION_IMMEDIATELY);
+void schedule_global_function_resending_and_send_request(unsigned int task_to_be_sent, unsigned int task_to_be_sent_in_case_of_error, unsigned short timeout) {
+   final_task_for_request_resending_g = task_to_be_sent_in_case_of_error;
+   schedule_function_resending(resend_usart_http_request_using_global_final_task, timeout, DO_NOT_EXECUTE_FUNCTION_IMMEDIATELY);
 
-   send_request(task);
+   send_request(task_to_be_sent);
 }
 
 void add_error() {
@@ -881,6 +858,8 @@ void add_error() {
       received_usart_error_data_g = NULL;
    }
    received_usart_error_data_g = get_received_usart_error_data();
+   delete_current_piped_task();
+   sent_task_g = 0;
 }
 
 void establish_long_polling_connection(unsigned int request_task) {
@@ -894,12 +873,13 @@ char *generate_request(char *request_template) {
    //char *response_timestamp = num_to_string(calculate_response_timestamp());
    char *response_timestamp = "-1";
    char *debug_info_included = read_flag(&general_flags_g, SEND_DEBUG_INFO_FLAG) ? "true" : "false";
+   char *server_is_available = read_flag(&general_flags_g, SERVER_IS_AVAILABLE_FLAG) ? "true" : "false";
    char *status_json;
 
    if (read_flag(&general_flags_g, SEND_DEBUG_INFO_FLAG)) {
-      status_json = add_debug_info(gain, debug_info_included, response_timestamp);
+      status_json = add_debug_info(gain, debug_info_included, response_timestamp, server_is_available);
    } else {
-      char *parameters_for_status[] = {gain, debug_info_included, response_timestamp, NULL};
+      char *parameters_for_status[] = {gain, debug_info_included, response_timestamp, server_is_available, NULL};
       status_json = set_string_parameters(STATUS_JSON, parameters_for_status);
    }
    free(gain);
@@ -919,7 +899,7 @@ char *generate_request(char *request_template) {
    return request;
 }
 
-void *add_debug_info(char *gain, char *debug_info_included, char *response_timestamp) {
+void *add_debug_info(char *gain, char *debug_info_included, char *response_timestamp, char *server_is_available) {
    char *errors_amount_string = num_to_string(send_usart_data_errors_unresetable_counter_g);
    char *usart_overrun_errors_counter_string = num_to_string(usart_overrun_errors_counter_g);
    char *usart_idle_line_detection_counter_string = num_to_string(usart_idle_line_detection_counter_g);
@@ -929,7 +909,7 @@ void *add_debug_info(char *gain, char *debug_info_included, char *response_times
    char *received_usart_error_data = last_error_task_g && received_usart_error_data_g != NULL ? received_usart_error_data_g : "";
    char *parameters_for_status[] = {gain, debug_info_included, errors_amount_string, usart_overrun_errors_counter_string,
          usart_idle_line_detection_counter_string, usart_noise_detection_counter_string, usart_framing_errors_counter_string,
-         last_error_task_string, received_usart_error_data, response_timestamp, NULL};
+         last_error_task_string, received_usart_error_data, response_timestamp, server_is_available, NULL};
    char *status_json = set_string_parameters(DEBUG_STATUS_JSON, parameters_for_status);
 
    free(errors_amount_string);
@@ -1002,19 +982,12 @@ void prepare_http_request(char address[], char port[], char request[], void (*ex
    add_piped_task_to_send_into_tail(request_task);
 }
 
-void resend_usart_get_request_using_global_final_task() {
-   resend_usart_get_request(final_task_for_request_resending_g);
+void resend_usart_http_request_using_global_final_task() {
+   resend_usart_http_request(final_task_for_request_resending_g);
 }
 
-void resend_usart_get_request(unsigned int final_task) {
+void resend_usart_http_request(unsigned int final_task) {
    send_usart_data_function_g = NULL;
-   delete_piped_task(SET_BYTES_TO_SEND_IN_REQUEST_TASK);
-   //delete_piped_task(CLOSE_CONNECTION_FLAG);
-   delete_piped_task(final_task);
-
-   //add_piped_task_to_send_into_tail(CLOSE_CONNECTION_FLAG);
-   add_piped_task_to_send_into_tail(CONNECT_TO_SERVER_TASK);
-   add_piped_task_to_send_into_tail(SET_BYTES_TO_SEND_IN_REQUEST_TASK);
    add_piped_task_to_send_into_tail(final_task);
 }
 
@@ -1209,7 +1182,7 @@ void *get_received_usart_error_data() {
    for (unsigned char i = 0; i < received_data_length; i++) {
       char received_char = usart_data_received_buffer_g[i];
 
-      if (received_char <= '\"') {
+      if (received_char < ' ' || received_char == '\"') {
          if (received_char == '\r') {
             received_char = 'r';
          } else if (received_char == '\n') {
