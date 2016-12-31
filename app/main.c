@@ -101,6 +101,7 @@ typedef enum {
 } ImmediatelyFunctionExecution;
 
 #define RECEIVED_USART_DATA_FOR_DEBUG_INFO_MAX_LENGTH 100
+#define MALLOC_ADDRESSES_SIZE 100
 
 unsigned int piped_tasks_to_send_g[PIPED_TASKS_TO_SEND_SIZE];
 unsigned int piped_tasks_history_g[PIPED_TASKS_HISTORY_SIZE];
@@ -160,7 +161,7 @@ char default_access_point_gain_g[DEFAULT_ACCESS_POINT_GAIN_SIZE] = {' ', ' ', ' 
 volatile unsigned short usart_received_bytes_g;
 volatile unsigned int final_task_for_request_resending_g;
 
-void (*send_usart_data_function_g)() = NULL;
+void (*scheduled_function_to_execute_on_error_g)() = NULL;
 void (*on_response_g)() = NULL;
 volatile unsigned int send_usart_data_time_counter_g;
 volatile unsigned short send_usart_data_timout_sec_g = 0xFFFF;
@@ -180,6 +181,10 @@ volatile unsigned short usart_overrun_errors_counter_g;
 volatile unsigned short usart_idle_line_detection_counter_g;
 volatile unsigned short usart_noise_detection_counter_g;
 volatile unsigned short usart_framing_errors_counter_g;
+
+char *malloc_addresses_g[MALLOC_ADDRESSES_SIZE];
+unsigned int malloc_size_to_be_allocated_g;
+unsigned int malloc_invoked_function_address_g;
 
 void IWDG_Config();
 void Clock_Config();
@@ -228,7 +233,6 @@ void add_piped_task_to_send_into_tail(unsigned int task);
 void add_piped_task_to_send_into_head(unsigned int task);
 void delete_piped_task(unsigned int task);
 void on_successfully_receive_general_actions();
-void prepare_http_request_without_parameters(char request_template[], unsigned int request_task);
 void prepare_http_request(char address[], char port[], char request[], void (*on_response)(), unsigned int request_task);
 void resend_usart_http_request_using_global_final_task();
 void *num_to_string(unsigned int number);
@@ -264,6 +268,10 @@ void add_piped_task_into_history(unsigned int task);
 unsigned int get_last_piped_task_in_history();
 void *get_received_usart_error_data();
 void save_default_access_point_gain();
+char *debug_malloc(unsigned int size, unsigned int invoked_function);
+void debug_free(char *memory_location_to_free);
+void add_debug_malloc_address(char *allocated_memory_location);
+void remove_debug_malloc_address(char *freed_memory_location);
 
 void SysTick_Handler() {
 }
@@ -297,7 +305,7 @@ void TIM3_IRQHandler() {
       set_flag(&general_flags_g, USART_DATA_RECEIVED_FLAG);
    }
    usart_received_bytes_g = 0;
-   if (send_usart_data_function_g != NULL) {
+   if (scheduled_function_to_execute_on_error_g != NULL) {
       send_usart_data_time_counter_g++;
    }
    network_searching_status_led_counter_g++;
@@ -381,17 +389,17 @@ int main() {
                sent_task = sent_task_g;
             }*/
             sent_task = sent_task_g;
-         } else if (send_usart_data_function_g != NULL && send_usart_data_passed_time_sec >= send_usart_data_timout_sec_g) {
+         } else if (scheduled_function_to_execute_on_error_g != NULL && send_usart_data_passed_time_sec >= send_usart_data_timout_sec_g) {
             if (usart_data_to_be_transmitted_buffer_g != NULL) {
                free(usart_data_to_be_transmitted_buffer_g);
                usart_data_to_be_transmitted_buffer_g = NULL;
             }
 
-            send_usart_data_function_g();
+            scheduled_function_to_execute_on_error_g();
          }
 
          unsigned int current_piped_task_to_send = get_current_piped_task_to_send();
-         if (send_usart_data_function_g != NULL) {
+         if (scheduled_function_to_execute_on_error_g != NULL) {
             current_piped_task_to_send = 0;
          }
 
@@ -783,16 +791,10 @@ unsigned char handle_establish_long_polling_connection_request_task(unsigned int
                reset_flag(&general_flags_g, TURN_PROJECTOR_ON);
             }
 
-            /*char *timestamp = get_gson_element_value(usart_data_received_buffer_g, TIMESTAMP_JSON_ELEMENT);
-            if (timestamp != NULL) {
-               response_timestamp_ms_g = atoi(timestamp);
-               free(timestamp);
-            }*/
-
             set_flag(&general_flags_g, SERVER_IS_AVAILABLE_FLAG);
             add_piped_task_to_send_into_tail(ESTABLISH_LONG_POLLING_CONNECTION_TASK);
          } else {
-            send_usart_data_timout_sec_g = 5; // Reset long timeout of long polling request
+            send_usart_data_timout_sec_g = 15; // Reset long timeout of long polling request
 
             reset_flag(&general_flags_g, SERVER_IS_AVAILABLE_FLAG);
             add_error();
@@ -808,7 +810,7 @@ void reset_device_state() {
    clear_piped_request_commands_to_send();
    clear_usart_data_received_buffer();
    on_response_g = NULL;
-   send_usart_data_function_g = NULL;
+   scheduled_function_to_execute_on_error_g = NULL;
 
    if (received_usart_error_data_g != NULL) {
       free(received_usart_error_data_g);
@@ -863,6 +865,7 @@ void add_error() {
 }
 
 void establish_long_polling_connection(unsigned int request_task) {
+   clear_piped_request_commands_to_send();
    char *request = generate_request(ESP8226_REQUEST_SEND_STATUS_INFO_AND_ESTABLISH_LONG_POLLING_REQUEST);
 
    prepare_http_request(ESP8226_SERVER_IP_ADDRESS, ESP8226_SERVER_PORT, request, NULL, request_task);
@@ -950,19 +953,12 @@ void set_default_wifi_mode() {
    set_flag(&sent_task_g, SET_DEFAULT_STATION_WIFI_MODE_TASK);
 }
 
-void prepare_http_request_without_parameters(char request_template[], unsigned int request_task) {
-   char *parameters_for_request[] = {ESP8226_SERVER_IP_ADDRESS, NULL};
-   char *request = set_string_parameters(request_template, parameters_for_request);
-
-   prepare_http_request(ESP8226_SERVER_IP_ADDRESS, ESP8226_SERVER_PORT, request, NULL, request_task);
-}
-
 /**
  * "request" shall be allocated with "malloc" function. Later it will be removed with "free" function
  */
 void prepare_http_request(char address[], char port[], char request[], void (*execute_on_response)(), unsigned int request_task) {
    clear_piped_request_commands_to_send();
-   send_usart_data_function_g = NULL;
+   scheduled_function_to_execute_on_error_g = NULL;
 
    char *parameters[] = {address, port, NULL};
    piped_request_commands_to_send_g[PIPED_REQUEST_CIPSTART_COMMAND_INDEX] = set_string_parameters(ESP8226_REQUEST_CONNECT_TO_SERVER, parameters);
@@ -987,7 +983,7 @@ void resend_usart_http_request_using_global_final_task() {
 }
 
 void resend_usart_http_request(unsigned int final_task) {
-   send_usart_data_function_g = NULL;
+   scheduled_function_to_execute_on_error_g = NULL;
    add_piped_task_to_send_into_tail(final_task);
 }
 
@@ -1029,7 +1025,7 @@ void send_request(unsigned int sent_task_to_set) {
 }
 
 void on_successfully_receive_general_actions() {
-   send_usart_data_function_g = NULL;
+   scheduled_function_to_execute_on_error_g = NULL;
    send_usart_data_errors_counter_g = 0;
    delete_current_piped_task();
 }
@@ -1275,7 +1271,7 @@ void connect_to_network() {
  */
 void schedule_function_resending(void (*function_to_execute)(), unsigned short timeout, ImmediatelyFunctionExecution execute) {
    send_usart_data_timout_sec_g = timeout;
-   send_usart_data_function_g = function_to_execute;
+   scheduled_function_to_execute_on_error_g = function_to_execute;
 
    if (execute == EXECUTE_FUNCTION_IMMEDIATELY) {
       function_to_execute();
@@ -1777,4 +1773,39 @@ void disable_esp8266() {
 unsigned char is_esp8266_enabled(unsigned char include_timer) {
    return include_timer ? (GPIO_ReadOutputDataBit(ESP8266_CONTROL_PORT, ESP8266_CONTROL_PIN) && esp8266_disabled_timer_g == 0) :
          GPIO_ReadOutputDataBit(ESP8266_CONTROL_PORT, ESP8266_CONTROL_PIN);
+}
+
+char *debug_malloc(unsigned int size, unsigned int invoked_function_address) {
+   malloc_size_to_be_allocated_g = size;
+   malloc_invoked_function_address_g = invoked_function_address;
+   char *allocated_memory_location = malloc(size);
+   add_debug_malloc_address(allocated_memory_location);
+   return allocated_memory_location;
+}
+
+void debug_free(char *memory_location_to_free) {
+   free(memory_location_to_free);
+   remove_debug_malloc_address(memory_location_to_free);
+}
+
+void add_debug_malloc_address(char *allocated_memory_location) {
+   for (unsigned short i = 0; i < MALLOC_ADDRESSES_SIZE; i++) {
+      char *current_location = malloc_addresses_g[i];
+
+      if (current_location == NULL) {
+         malloc_addresses_g[i] = allocated_memory_location;
+         break;
+      }
+   }
+}
+
+void remove_debug_malloc_address(char *freed_memory_location) {
+   for (unsigned short i = 0; i < MALLOC_ADDRESSES_SIZE; i++) {
+      char *current_location = malloc_addresses_g[i];
+
+      if (current_location == freed_memory_location) {
+         malloc_addresses_g[i] = NULL;
+         break;
+      }
+   }
 }
