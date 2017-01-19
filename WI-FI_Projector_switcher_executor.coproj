@@ -19,7 +19,7 @@
           <Define name="STM32F030"/>
           <Define name="USE_STDPERIPH_DRIVER"/>
           <Define name="ARM_MATH_CM0"/>
-          <Define name="STM32F030K6T6"/>
+          <Define name="STM32F030F4P6"/>
         </DefinedSymbols>
       </Compile>
       <Link useDefault="0">

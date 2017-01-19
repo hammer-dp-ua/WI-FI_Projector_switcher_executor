@@ -144,10 +144,10 @@ char ESP8226_REQUEST_SET_OWN_IP_ADDRESS[] __attribute__ ((section(".text.const")
 char ESP8226_REQUEST_SEND_STATUS_INFO_AND_ESTABLISH_LONG_POLLING_REQUEST[] __attribute__ ((section(".text.const"))) =
       "POST /server/esp8266/projectorDeferred HTTP/1.1\r\nContent-Length: <1>\r\nHost: <2>\r\nUser-Agent: ESP8266\r\nContent-Type: application/json\r\nAccept: application/json\r\nConnection: keep-alive\r\n\r\n<3>\r\n";
 char DEBUG_STATUS_JSON[] __attribute__ ((section(".text.const"))) =
-      "{\"gain\":\"<1>\",\"debugInfoIncluded\":<2>,\"errors\":\"<3>\",\"usartOverrunErrors\":\"<4>\",\"usartIdleLineDetections\":\"<5>\",\"usartNoiseDetection\":\"<6>\",\"usartFramingErrors\":\"<7>\",\"lastErrorTask\":\"<8>\",\"usartData\":\"<9>\",\"timeStamp\":\"<10>\",\"serverIsAvailable\":<11>}";
+      "{\"gain\":\"<1>\",\"debugInfoIncluded\":<2>,\"errors\":\"<3>\",\"usartOverrunErrors\":\"<4>\",\"usartIdleLineDetections\":\"<5>\",\"usartNoiseDetection\":\"<6>\",\"usartFramingErrors\":\"<7>\",\"lastErrorTask\":\"<8>\",\"usartData\":\"<9>\",\"timeStamp\":\"<10>\",\"serverIsAvailable\":<11>,\"deviceName\":\"<12>\"}";
 char TIMESTAMP_JSON_ELEMENT[] __attribute__ ((section(".text.const"))) = "timeStamp";
 char TURN_ON_TRUE_JSON_ELEMENT[] __attribute__ ((section(".text.const"))) = "\"turnOn\":true";
-char STATUS_JSON[] __attribute__ ((section(".text.const"))) = "{\"gain\":\"<1>\",\"debugInfoIncluded\":<2>,\"timeStamp\":\"<3>\",\"serverIsAvailable\":<4>}";
+char STATUS_JSON[] __attribute__ ((section(".text.const"))) = "{\"gain\":\"<1>\",\"debugInfoIncluded\":<2>,\"timeStamp\":\"<3>\",\"serverIsAvailable\":<4>,\"deviceName\":\"<5>\"}";
 char ESP8226_RESPONSE_OK_STATUS_CODE[] __attribute__ ((section(".text.const"))) = "\"statusCode\":\"OK\"";
 char ESP8226_RESPONSE_HTTP_STATUS_200_OK[] __attribute__ ((section(".text.const"))) = "200 OK";
 char ESP8226_RESPONSE_HTTP_STATUS_400_BAD_REQUEST[] __attribute__ ((section(".text.const"))) = "HTTP/1.1 400 Bad Request";
@@ -885,7 +885,7 @@ char *generate_request(char *request_template) {
    if (read_flag(&general_flags_g, SEND_DEBUG_INFO_FLAG)) {
       status_json = add_debug_info(gain, debug_info_included, response_timestamp, server_is_available);
    } else {
-      char *parameters_for_status[] = {gain, debug_info_included, response_timestamp, server_is_available, NULL};
+      char *parameters_for_status[] = {gain, debug_info_included, response_timestamp, server_is_available, ESP8226_OWN_DEVICE_NAME, NULL};
       status_json = set_string_parameters(STATUS_JSON, parameters_for_status);
    }
    free(gain);
@@ -915,7 +915,7 @@ void *add_debug_info(char *gain, char *debug_info_included, char *response_times
    char *received_usart_error_data = last_error_task_g && received_usart_error_data_g != NULL ? received_usart_error_data_g : "";
    char *parameters_for_status[] = {gain, debug_info_included, errors_amount_string, usart_overrun_errors_counter_string,
          usart_idle_line_detection_counter_string, usart_noise_detection_counter_string, usart_framing_errors_counter_string,
-         last_error_task_string, received_usart_error_data, response_timestamp, server_is_available, NULL};
+         last_error_task_string, received_usart_error_data, response_timestamp, server_is_available, ESP8226_OWN_DEVICE_NAME, NULL};
    char *status_json = set_string_parameters(DEBUG_STATUS_JSON, parameters_for_status);
 
    free(errors_amount_string);
@@ -1034,43 +1034,55 @@ void on_successfully_receive_general_actions(unsigned int sent_task) {
    //delete_current_piped_task();
 }
 
+void fill_default_access_point_gain() {
+   default_access_point_gain_g[DEFAULT_ACCESS_POINT_GAIN_SIZE - 1] = '1';
+   default_access_point_gain_g[DEFAULT_ACCESS_POINT_GAIN_SIZE - 2] = '-';
+}
+
 // +CWLAP:("Asus",-74,...)
 void save_default_access_point_gain() {
    if (!is_usart_response_contains_element(DEFAULT_ACCESS_POINT_NAME)) {
       return;
    }
 
-   unsigned char first_comma_is_found = 0;
-   char *access_point_starting_position = strstr(usart_data_received_buffer_g, DEFAULT_ACCESS_POINT_NAME);
-
-   if (access_point_starting_position == NULL) {
-      for (unsigned char i = 0; i < DEFAULT_ACCESS_POINT_GAIN_SIZE; i++) {
-         default_access_point_gain_g[i] = ' ';
-      }
+   for (unsigned char i = 0; i < DEFAULT_ACCESS_POINT_GAIN_SIZE; i++) {
+      default_access_point_gain_g[i] = ' ';
    }
 
-   while (*access_point_starting_position != '\0') {
-      if (first_comma_is_found && *access_point_starting_position == ',') {
-         access_point_starting_position--;
+   unsigned char first_comma_is_found = 0;
+   char *current_character = strstr(usart_data_received_buffer_g, DEFAULT_ACCESS_POINT_NAME);
+
+   if (current_character == NULL) {
+      fill_default_access_point_gain();
+      return;
+   }
+
+   while (*current_character != '\0') {
+      if (first_comma_is_found && *current_character == ',') {
+         current_character--;
          break;
       }
 
-      if (*access_point_starting_position == ',') {
+      if (*current_character == ',') {
          first_comma_is_found = 1;
       }
-      access_point_starting_position++;
+      current_character++;
    }
 
    for (unsigned char i = DEFAULT_ACCESS_POINT_GAIN_SIZE - 1; i != 0xFF; i--) {
-      if (*access_point_starting_position == ',') {
+      if (*current_character == ',') {
          for (unsigned char i2 = i; i2 != 0xFF; i2--) {
             default_access_point_gain_g[i2] = ' ';
          }
          break;
       }
 
-      default_access_point_gain_g[i] = *access_point_starting_position;
-      access_point_starting_position--;
+      if (*current_character != '-' && (*current_character < '0' || *current_character > '9')) {
+         fill_default_access_point_gain();
+         break;
+      }
+      default_access_point_gain_g[i] = *current_character;
+      current_character--;
    }
 }
 
